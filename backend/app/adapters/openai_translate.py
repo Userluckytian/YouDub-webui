@@ -46,7 +46,23 @@ class TranslationItem(BaseModel):
 def list_models(*, base_url: str, api_key: str) -> list[str]:
     if not api_key:
         raise ValueError("OpenAI API key is not configured.")
-    client = OpenAI(api_key=api_key, base_url=normalize_openai_base_url(base_url))
+    
+    # 智谱AI不支持 /models 接口，返回固定模型列表
+    normalized_url = normalize_openai_base_url(base_url)
+    if "bigmodel.cn" in normalized_url or "open.bigmodel.cn" in normalized_url:
+        return [
+            "glm-4.5-air",
+            "glm-4.6v",
+            "GLM-4.7-Flash",
+            "GLM-4.6V-Flash",
+            "GLM-4.1V-Thinking-Flash",
+            "GLM-4-Flash-250414",
+            "Cogview-3-Flash",
+            "CogVideoX-Flash"
+        ]
+    
+    # 其他支持 /models 的服务
+    client = OpenAI(api_key=api_key, base_url=normalized_url)
     response = client.models.list()
     seen: set[str] = set()
     models: list[str] = []

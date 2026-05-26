@@ -28,12 +28,25 @@ def _model_path() -> Path:
 def _load_model():
     global _MODEL
     if _MODEL is None:
+        import sys
         from voxcpm import VoxCPM
 
-        _MODEL = VoxCPM.from_pretrained(
-            str(_model_path()),
-            load_denoiser=os.getenv("VOXCPM_LOAD_DENOISER", "false").lower() == "true",
-        )
+        # 临时重定向标准输出以避免Windows下的print兼容性问题
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        try:
+            # 使用空设备重定向输出
+            import io
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            
+            _MODEL = VoxCPM.from_pretrained(
+                str(_model_path()),
+                load_denoiser=os.getenv("VOXCPM_LOAD_DENOISER", "false").lower() == "true",
+            )
+        finally:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
     return _MODEL
 
 
