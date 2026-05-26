@@ -74,7 +74,7 @@ https://github.com/user-attachments/assets/158de60a-7de4-4ddf-b3d8-478d0423aee6
 
 - **Windows 10/11 + PowerShell 5.1+**：推荐开发环境，也是本文档优先覆盖的平台。
 - **Linux / WSL2 / macOS**：后端和前端命令按 POSIX shell 给出；CUDA、FFmpeg、PyTorch/音频依赖需要按各平台实际环境安装。
-- **CUDA GPU**：推荐用于完整视频处理。`DEVICE=cpu` 可以运行部分流程，但完整转写、分离、TTS 会非常慢。
+- **CUDA GPU**：推荐用于完整视频处理。`DEVICE=cpu` 可以运行部分流程，但完整转写、分离、TTS 会非常慢；`DEVICE=mps` 会让 Whisper 自动退回 CPU 以避开 MPS float64 限制。
 
 基础依赖：
 
@@ -163,6 +163,30 @@ npm --prefix apps/web install --registry=https://registry.npmmirror.com
 
 如果 Aliyun 镜像中某个 Python 包暂时不可用，再单独对失败的包使用 Tsinghua 源重试；不要把多个镜像混在同一条 resolver 命令里。
 
+#### 可选：NVIDIA CUDA GPU
+
+如果要用 NVIDIA GPU 跑 Whisper、Demucs 或 VoxCPM，请在安装 `requirements.txt` 之前先安装 CUDA 版 PyTorch：
+
+Windows PowerShell：
+
+```powershell
+.\.venv\Scripts\pip.exe install -r requirements-pytorch-cu128.txt
+```
+
+Linux / WSL2：
+
+```bash
+.venv/bin/pip install -r requirements-pytorch-cu128.txt
+```
+
+`requirements-pytorch-cu128.txt` 默认使用 PyTorch 的 `cu128` wheel 源。不同 NVIDIA 驱动或 CUDA 环境可能需要不同的 PyTorch CUDA 版本，请按 [PyTorch 官方安装页](https://pytorch.org/get-started/locally/) 选择匹配命令。CPU 用户和 macOS 用户不需要执行这一步；如果没有安装 CUDA 版 PyTorch，请在 `.env` 中设置 `DEVICE=cpu`。
+
+安装后可以验证 CUDA 是否真的可用：
+
+```bash
+.venv/bin/python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+```
+
 ### 4. 配置环境
 
 Windows PowerShell：
@@ -185,14 +209,15 @@ cp env.txt.example .env
 | --- | --- |
 | `WORKFOLDER` | 每个任务的媒体、分段音频和中间产物目录。 |
 | `MODEL_CACHE_DIR` | ModelScope 模型缓存目录，默认用于 VoxCPM2。 |
-| `DEVICE` | 模型运行设备，例如 `cuda`、`cuda:0` 或 `cpu`。 |
+| `DEVICE` | 模型运行设备，例如 `auto`、`cuda`、`cuda:0`、`mps`、`mps:0` 或 `cpu`；`auto` 按 CUDA、MPS、CPU 顺序选择。 |
+| `DEMUCS_DEVICE` / `WHISPER_DEVICE` | 可选组件级设备覆盖；留空时使用 `DEVICE`。Whisper 选择 MPS 时会退回 CPU，因为词级时间戳对齐依赖 MPS 不支持的 float64 DTW。 |
 | `OPENAI_BASE_URL` | OpenAI 兼容 API 地址，例如 `https://api.openai.com/v1`。 |
 | `OPENAI_API_KEY` | 翻译阶段使用的 API key。 |
 | `OPENAI_MODEL` | 翻译阶段使用的 Chat Completions 模型。 |
 | `OPENAI_TRANSLATE_CONCURRENCY` | 翻译阶段的并发请求数，默认 `50`。 |
 | `YTDLP_PROXY_PORT` | yt-dlp 使用的本机代理端口，例如 `7890`。 |
 | `HTTP_PROXY` | 未在 UI 中设置代理端口时，yt-dlp 可读取的代理地址。 |
-| `VOXCPM_MODEL` / `VOXCPM_MODEL_DIR` | VoxCPM2 的 ModelScope 模型名或本地模型目录。 |
+| `VOXCPM_MODEL` / `VOXCPM_MODEL_DIR` | VoxCPM2 的 ModelScope 模型名或本地模型目录；VoxCPM 当前由上游包内部选择 CUDA/MPS/CPU，任务日志会显示为 `voxcpm=library-auto`。 |
 | `VOXCPM_LOAD_DENOISER` / `VOXCPM_CFG_VALUE` / `VOXCPM_INFERENCE_TIMESTEPS` / `VOXCPM_MIN_REFERENCE_MS` | VoxCPM2 推理参数。 |
 | `CORS_ALLOW_ORIGINS` / `CORS_ALLOW_ORIGIN_REGEX` | 自定义前端访问来源。 |
 

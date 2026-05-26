@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from pydub import AudioSegment
 
-from ..config import device
+from ..devices import resolve_device
 
 _MODEL = None
 
@@ -44,15 +44,16 @@ def _load_model():
     import whisper
 
     name = os.getenv("WHISPER_MODEL", "large-v3-turbo")
+    whisper_device = resolve_device("whisper").selected
     download_root = os.getenv("WHISPER_DOWNLOAD_ROOT") or None
     try:
-        _MODEL = whisper.load_model(name, device=device(), download_root=download_root)
+        _MODEL = whisper.load_model(name, device=whisper_device, download_root=download_root)
     except RuntimeError as exc:
         if not _is_checksum_error(exc):
             raise
         if not _remove_corrupt_whisper_cache(whisper, name, download_root):
             raise
-        _MODEL = whisper.load_model(name, device=device(), download_root=download_root)
+        _MODEL = whisper.load_model(name, device=whisper_device, download_root=download_root)
 
     return _MODEL
 
