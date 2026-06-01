@@ -216,7 +216,8 @@ Common environment variables:
 | `OPENAI_MODEL` | Chat Completions model used by the translation stage. |
 | `OPENAI_TRANSLATE_CONCURRENCY` | Parallel requests during translation. Default: `50`. |
 | `YTDLP_PROXY_PORT` | Local proxy port used by yt-dlp, for example `7890`. |
-| `HTTP_PROXY` | Proxy URL read by yt-dlp when no UI proxy port is set. |
+| `HTTP_PROXY` / `ALL_PROXY` | yt-dlp reads `HTTP_PROXY` when no UI proxy port is set; HTTPX/OpenAI SDK also reads these environment proxies. |
+| `NO_PROXY` | Comma-separated proxy bypass list. Include `localhost,127.0.0.1,::1` when using a local OpenAI-compatible service so local requests stay direct. |
 | `VOXCPM_MODEL` / `VOXCPM_MODEL_DIR` | VoxCPM2 ModelScope model ID or local model directory. VoxCPM currently selects CUDA/MPS/CPU inside the upstream package, and task logs report it as `voxcpm=library-auto`. |
 | `VOXCPM_LOAD_DENOISER` / `VOXCPM_CFG_VALUE` / `VOXCPM_INFERENCE_TIMESTEPS` / `VOXCPM_MIN_REFERENCE_MS` | VoxCPM2 inference controls. |
 | `CORS_ALLOW_ORIGINS` / `CORS_ALLOW_ORIGIN_REGEX` | Additional frontend origins. |
