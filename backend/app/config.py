@@ -15,6 +15,7 @@ YOUTUBE_COOKIE_PATH = COOKIE_DIR / "youtube.txt"
 WORKFOLDER = Path(os.getenv("WORKFOLDER", str(REPO_ROOT / "workfolder"))).expanduser()
 LOG_DIR = DATA_DIR / "logs"
 MODEL_CACHE_DIR = Path(os.getenv("MODEL_CACHE_DIR", str(DATA_DIR / "modelscope"))).expanduser()
+UPLOAD_TEMP_DIR = DATA_DIR / "upload_temp"
 
 
 def ensure_runtime_dirs() -> None:
@@ -23,6 +24,7 @@ def ensure_runtime_dirs() -> None:
     WORKFOLDER.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def device() -> str:
@@ -52,4 +54,12 @@ def ffprobe_binary() -> str:
 def ytdlp_defaults() -> dict[str, str]:
     return {
         "proxy_port": os.getenv("YTDLP_PROXY_PORT", ""),
+    }
+
+
+def upload_defaults() -> dict[str, str]:
+    return {
+        "mode": os.getenv("UPLOAD_MODE", "chunked"),  # "single" or "chunked"
+        "chunk_size_mb": os.getenv("UPLOAD_CHUNK_SIZE_MB", "10"),
+        "concurrency": os.getenv("UPLOAD_CONCURRENCY", "3"),
     }

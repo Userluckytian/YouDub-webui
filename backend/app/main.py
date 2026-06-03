@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,7 +16,7 @@ from pydantic import BaseModel
 from . import database, worker
 from .adapters.local_video import remove_upload, upload_dir
 from .adapters.openai_translate import list_models as list_openai_models
-from .config import WORKFOLDER, YOUTUBE_COOKIE_PATH, ensure_runtime_dirs
+from .config import UPLOAD_TEMP_DIR, WORKFOLDER, YOUTUBE_COOKIE_PATH, ensure_runtime_dirs
 from .pipeline import run_task
 from .runtime_checks import validate_runtime_device
 from .sanitize import sanitize_text
@@ -24,6 +25,10 @@ from .youtube import LOCAL_UPLOAD_DIRECTIONS, extract_video_id, is_local_upload_
 ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".flv", ".wmv"}
 LOCAL_UPLOAD_CHUNK_SIZE = 1024 * 1024
 MAX_LOCAL_UPLOAD_BYTES = int(os.getenv("LOCAL_UPLOAD_MAX_BYTES", str(4 * 1024 * 1024 * 1024)))
+
+# Global lock for manifest file access
+upload_locks: dict[str, threading.Lock] = {}
+upload_locks_lock = threading.Lock()
 
 
 def mask_secret(value: str) -> str:
@@ -57,6 +62,24 @@ class YtdlpSettingsUpdate(BaseModel):
     proxy_port: str = ""
 
 
+class UploadSettingsUpdate(BaseModel):
+    mode: str = "chunked"  # "single" or "chunked"
+    chunk_size_mb: str = "10"
+    concurrency: str = "3"
+
+
+class ChunkUploadInitRequest(BaseModel):
+    direction: str = "en-zh"
+    file_name: str
+    file_size: int
+    total_chunks: int
+
+
+class ChunkUploadChunkRequest(BaseModel):
+    upload_id: str
+    chunk_index: int
+
+
 def normalize_proxy_port(value: str) -> str:
     proxy_port = value.strip()
     if not proxy_port:
@@ -81,6 +104,37 @@ def normalize_translate_concurrency(value: str) -> str:
             status_code=422, detail="Translate concurrency must be between 1 and 200."
         )
     return concurrency
+
+
+def normalize_upload_mode(value: str) -> str:
+    mode = value.strip()
+    if mode not in ("single", "chunked"):
+        raise HTTPException(status_code=422, detail="Upload mode must be 'single' or 'chunked'.")
+    return mode
+
+
+def normalize_chunk_size_mb(value: str) -> str:
+    size = value.strip()
+    if not size:
+        return "10"
+    if not all("0" <= char <= "9" for char in size):
+        raise HTTPException(status_code=422, detail="Chunk size must be numeric.")
+    size_mb = int(size)
+    if size_mb < 1 or size_mb > 1000:
+        raise HTTPException(status_code=422, detail="Chunk size must be between 1 and 1000 MB.")
+    return str(size_mb)
+
+
+def normalize_upload_concurrency(value: str) -> str:
+    concurrency = value.strip()
+    if not concurrency:
+        return "3"
+    if not all("0" <= char <= "9" for char in concurrency):
+        raise HTTPException(status_code=422, detail="Upload concurrency must be numeric.")
+    workers = int(concurrency)
+    if workers < 1 or workers > 10:
+        raise HTTPException(status_code=422, detail="Upload concurrency must be between 1 and 10.")
+    return str(workers)
 
 
 @asynccontextmanager
@@ -212,6 +266,180 @@ def upload_local_video(direction: str = Form("en-zh"), file: UploadFile = File(.
     database.update_task(task_id, title=Path(original_name).stem)
     worker.enqueue(task_id)
     return database.get_task(task_id)
+
+
+def _get_upload_temp_dir(upload_id: str) -> Path:
+    return UPLOAD_TEMP_DIR / upload_id
+
+
+def _get_chunk_path(upload_id: str, chunk_index: int) -> Path:
+    return _get_upload_temp_dir(upload_id) / f"chunk_{chunk_index}.part"
+
+
+def _get_chunk_manifest_path(upload_id: str) -> Path:
+    return _get_upload_temp_dir(upload_id) / "manifest.json"
+
+
+@app.post("/api/tasks/upload/init", status_code=201)
+def init_chunk_upload(payload: ChunkUploadInitRequest) -> dict:
+    if payload.direction not in LOCAL_UPLOAD_DIRECTIONS:
+        raise HTTPException(status_code=422, detail="Unsupported local video direction.")
+
+    _ensure_runtime_ready()
+    task_id = str(uuid.uuid4())
+    temp_dir = _get_upload_temp_dir(task_id)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save manifest
+    import json
+    manifest = {
+        "task_id": task_id,
+        "direction": payload.direction,
+        "file_name": payload.file_name,
+        "file_size": payload.file_size,
+        "total_chunks": payload.total_chunks,
+        "uploaded_chunks": [],
+    }
+    _get_chunk_manifest_path(task_id).write_text(json.dumps(manifest), encoding="utf-8")
+
+    return {
+        "upload_id": task_id,
+        "chunk_size": int(database.get_upload_settings()["chunk_size_mb"]) * 1024 * 1024,
+    }
+
+
+@app.post("/api/tasks/upload/chunk")
+def upload_chunk(
+    upload_id: str = Form(...),
+    chunk_index: int = Form(...),
+    file: UploadFile = File(...),
+) -> dict:
+    temp_dir = _get_upload_temp_dir(upload_id)
+    if not temp_dir.exists():
+        raise HTTPException(status_code=404, detail="Upload session not found.")
+
+    manifest_path = _get_chunk_manifest_path(upload_id)
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail="Upload manifest not found.")
+
+    import json
+
+    chunk_path = _get_chunk_path(upload_id, chunk_index)
+
+    # Get or create lock for this upload_id
+    with upload_locks_lock:
+        if upload_id not in upload_locks:
+            upload_locks[upload_id] = threading.Lock()
+        lock = upload_locks[upload_id]
+
+    # Use lock to prevent concurrent access
+    with lock:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        if chunk_index < 0 or chunk_index >= manifest["total_chunks"]:
+            raise HTTPException(status_code=422, detail="Invalid chunk index.")
+
+        # Skip if already uploaded
+        if chunk_path.exists():
+            if chunk_index not in manifest["uploaded_chunks"]:
+                manifest["uploaded_chunks"].append(chunk_index)
+                manifest["uploaded_chunks"].sort()
+                manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+            return {"uploaded_chunks": manifest["uploaded_chunks"]}
+
+        # Save chunk
+        chunk_path.write_bytes(file.file.read())
+
+        # Update manifest
+        if chunk_index not in manifest["uploaded_chunks"]:
+            manifest["uploaded_chunks"].append(chunk_index)
+            manifest["uploaded_chunks"].sort()
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+    return {"uploaded_chunks": manifest["uploaded_chunks"]}
+
+
+@app.post("/api/tasks/upload/complete", status_code=201)
+def complete_chunk_upload(upload_id: str = Form(...)) -> dict:
+    temp_dir = _get_upload_temp_dir(upload_id)
+    if not temp_dir.exists():
+        raise HTTPException(status_code=404, detail="Upload session not found.")
+
+    manifest_path = _get_chunk_manifest_path(upload_id)
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail="Upload manifest not found.")
+
+    import json
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    if len(manifest["uploaded_chunks"]) != manifest["total_chunks"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Upload incomplete: {len(manifest['uploaded_chunks'])}/{manifest['total_chunks']} chunks uploaded.",
+        )
+
+    # Merge chunks
+    task_id = manifest["task_id"]
+    original_name = manifest["file_name"]
+    stored_name = _clean_upload_filename(original_name)
+    target_dir = upload_dir(WORKFOLDER, task_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_file = target_dir / stored_name
+
+    with target_file.open("wb") as output:
+        for chunk_index in range(manifest["total_chunks"]):
+            chunk_path = _get_chunk_path(upload_id, chunk_index)
+            if not chunk_path.exists():
+                raise HTTPException(status_code=500, detail=f"Chunk {chunk_index} missing.")
+            output.write(chunk_path.read_bytes())
+
+    # Cleanup temp directory
+    import shutil
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # Create task
+    direction = manifest["direction"]
+    url = f"local://upload/{task_id}?direction={direction}&filename={quote(original_name)}"
+    database.create_task(url, task_id=task_id)
+    database.update_task(task_id, title=Path(original_name).stem)
+    worker.enqueue(task_id)
+
+    return database.get_task(task_id)
+
+
+@app.get("/api/tasks/upload/status/{upload_id}")
+def get_chunk_upload_status(upload_id: str) -> dict:
+    temp_dir = _get_upload_temp_dir(upload_id)
+    if not temp_dir.exists():
+        raise HTTPException(status_code=404, detail="Upload session not found.")
+
+    manifest_path = _get_chunk_manifest_path(upload_id)
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail="Upload manifest not found.")
+
+    import json
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    return {
+        "uploaded_chunks": manifest["uploaded_chunks"],
+        "total_chunks": manifest["total_chunks"],
+        "progress": len(manifest["uploaded_chunks"]) / manifest["total_chunks"] * 100,
+    }
+
+
+@app.get("/api/settings/upload")
+def get_upload_settings() -> dict:
+    return database.get_upload_settings()
+
+
+@app.post("/api/settings/upload")
+def save_upload_settings(payload: UploadSettingsUpdate) -> dict:
+    database.save_upload_settings(
+        normalize_upload_mode(payload.mode),
+        normalize_chunk_size_mb(payload.chunk_size_mb),
+        normalize_upload_concurrency(payload.concurrency),
+    )
+    return get_upload_settings()
 
 
 @app.get("/api/tasks/current")

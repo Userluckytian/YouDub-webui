@@ -8,8 +8,13 @@ import { ChevronRight, Play, Upload } from "lucide-react"
 import {
   TaskSummary,
   LocalDirection,
+  completeChunkUpload,
   createTask,
+  getChunkUploadStatus,
+  getUploadSettings,
+  initChunkUpload,
   listTasks,
+  uploadChunk,
   uploadLocalTask,
 } from "@/lib/api"
 import { useI18n } from "@/lib/i18n"
@@ -17,6 +22,7 @@ import { statusBadgeClass } from "@/lib/status"
 import { AppHeader } from "@/components/app-header"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { UploadProgress } from "@/components/upload-progress"
 import {
   Card,
   CardContent,
@@ -64,6 +70,13 @@ export default function Home() {
   const [tasks, setTasks] = useState<TaskSummary[]>([])
   const [error, setError] = useState("")
   const [submitting, setSubmitting] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState<{
+    fileName: string
+    progress: number
+    uploadedBytes: number
+    totalBytes: number
+  } | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   async function refreshTasks() {
     const { tasks: list } = await listTasks()
@@ -95,16 +108,135 @@ export default function Home() {
     setLocalFile(event.target.files?.[0] || null)
   }
 
+  async function uploadWithChunks(file: File, direction: LocalDirection) {
+    const settings = await getUploadSettings()
+    const chunkSize = parseInt(settings.chunk_size_mb) * 1024 * 1024
+    const concurrency = parseInt(settings.concurrency)
+    const totalChunks = Math.ceil(file.size / chunkSize)
+
+    const initResponse = await initChunkUpload(
+      direction,
+      file.name,
+      file.size,
+      totalChunks
+    )
+
+    const uploadId = initResponse.upload_id
+    const actualChunkSize = initResponse.chunk_size
+
+    setUploadProgress({
+      fileName: file.name,
+      progress: 0,
+      uploadedBytes: 0,
+      totalBytes: file.size,
+    })
+
+    const uploadedChunks = new Set<number>()
+    let uploadedBytes = 0
+
+    const uploadSingleChunk = async (chunkIndex: number, retryCount = 0): Promise<void> => {
+      if (uploadedChunks.has(chunkIndex)) return
+
+      const start = chunkIndex * actualChunkSize
+      const end = Math.min(start + actualChunkSize, file.size)
+      const chunk = file.slice(start, end)
+
+      try {
+        const response = await uploadChunk(uploadId, chunkIndex, chunk)
+        if (response.uploaded_chunks.includes(chunkIndex)) {
+          uploadedChunks.add(chunkIndex)
+          uploadedBytes += chunk.size
+
+          setUploadProgress({
+            fileName: file.name,
+            progress: (uploadedChunks.size / totalChunks) * 100,
+            uploadedBytes,
+            totalBytes: file.size,
+          })
+        }
+      } catch (error) {
+        if (retryCount < 3) {
+          await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)))
+          return uploadSingleChunk(chunkIndex, retryCount + 1)
+        }
+        throw error
+      }
+    }
+
+    const uploadQueue: number[] = []
+    for (let i = 0; i < totalChunks; i++) {
+      uploadQueue.push(i)
+    }
+
+    const uploadNextBatch = async (): Promise<void> => {
+      if (uploadQueue.length === 0) return
+
+      const batch = uploadQueue.splice(0, concurrency)
+      const results = await Promise.allSettled(batch.map(uploadSingleChunk))
+
+      const failedIndices = results
+        .map((result, index) => result.status === 'rejected' ? batch[index] : -1)
+        .filter(index => index !== -1)
+
+      if (failedIndices.length > 0) {
+        uploadQueue.unshift(...failedIndices)
+        await new Promise(resolve => setTimeout(resolve, 2000))
+      }
+
+      if (uploadQueue.length > 0) {
+        await uploadNextBatch()
+      }
+    }
+
+    await uploadNextBatch()
+
+    // Verify all chunks are uploaded
+    const status = await getChunkUploadStatus(uploadId)
+    const missingChunks = []
+    for (let i = 0; i < totalChunks; i++) {
+      if (!status.uploaded_chunks.includes(i)) {
+        missingChunks.push(i)
+      }
+    }
+
+    // Upload missing chunks
+    if (missingChunks.length > 0) {
+      for (const chunkIndex of missingChunks) {
+        await uploadSingleChunk(chunkIndex)
+      }
+    }
+
+    const task = await completeChunkUpload(uploadId)
+
+    setUploadProgress(null)
+    return task
+  }
+
   async function submitTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setError("")
     const submittedUrl = youtubeUrl.trim() || bilibiliUrl.trim()
     if (!submittedUrl && !localFile) return
     setSubmitting(true)
+
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
+    abortControllerRef.current = new AbortController()
+
     try {
-      const created = localFile
-        ? await uploadLocalTask(localFile, localDirection)
-        : await createTask(submittedUrl)
+      let created
+      if (localFile) {
+        const settings = await getUploadSettings()
+        if (settings.mode === "chunked") {
+          created = await uploadWithChunks(localFile, localDirection)
+        } else {
+          created = await uploadLocalTask(localFile, localDirection)
+        }
+      } else {
+        created = await createTask(submittedUrl)
+      }
+
       setYoutubeUrl("")
       setBilibiliUrl("")
       setLocalFile(null)
@@ -114,10 +246,24 @@ export default function Home() {
       refreshTasks().catch(() => undefined)
       router.push(`/tasks/${created.id}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : t.home.createError)
+      if (err instanceof Error && err.name === "AbortError") {
+        setError("上传已取消")
+      } else {
+        setError(err instanceof Error ? err.message : t.home.createError)
+      }
     } finally {
       setSubmitting(false)
+      setUploadProgress(null)
+      abortControllerRef.current = null
     }
+  }
+
+  function handleCancelUpload() {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
+    setUploadProgress(null)
+    setSubmitting(false)
   }
 
   const queued = activeCount(tasks)
@@ -204,6 +350,16 @@ export default function Home() {
               <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
                 {error}
               </div>
+            ) : null}
+
+            {uploadProgress ? (
+              <UploadProgress
+                fileName={uploadProgress.fileName}
+                progress={uploadProgress.progress}
+                uploadedBytes={uploadProgress.uploadedBytes}
+                totalBytes={uploadProgress.totalBytes}
+                onCancel={handleCancelUpload}
+              />
             ) : null}
           </CardContent>
         </Card>

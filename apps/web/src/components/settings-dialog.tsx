@@ -7,9 +7,11 @@ import {
   getCookieInfo,
   getOpenAIModels,
   getOpenAISettings,
+  getUploadSettings,
   getYtdlpSettings,
   saveCookie,
   saveOpenAISettings,
+  saveUploadSettings,
   saveYtdlpSettings,
 } from "@/lib/api"
 import { LANGUAGE_OPTIONS, useI18n } from "@/lib/i18n"
@@ -41,6 +43,9 @@ type SettingsForm = {
   model: string
   translateConcurrency: string
   proxyPort: string
+  uploadMode: "single" | "chunked"
+  chunkSizeMb: string
+  uploadConcurrency: string
 }
 
 const SAVED_API_KEY_MASK = "********"
@@ -55,6 +60,9 @@ const defaultSettings: SettingsForm = {
   model: "gpt-4o-mini",
   translateConcurrency: "50",
   proxyPort: "",
+  uploadMode: "chunked",
+  chunkSizeMb: "10",
+  uploadConcurrency: "3",
 }
 
 function uniqueModels(models: string[]) {
@@ -81,8 +89,8 @@ export function SettingsDialog() {
 
   useEffect(() => {
     if (!open) return
-    Promise.all([getCookieInfo(), getOpenAISettings(), getYtdlpSettings()])
-      .then(([cookie, openai, ytdlp]) => {
+    Promise.all([getCookieInfo(), getOpenAISettings(), getYtdlpSettings(), getUploadSettings()])
+      .then(([cookie, openai, ytdlp, upload]) => {
         setSettings({
           cookie: cookie.exists ? SAVED_COOKIE_SENTINEL : "",
           baseUrl: openai.base_url,
@@ -90,6 +98,9 @@ export function SettingsDialog() {
           model: openai.model,
           translateConcurrency: openai.translate_concurrency || "50",
           proxyPort: ytdlp.proxy_port,
+          uploadMode: upload.mode as "single" | "chunked",
+          chunkSizeMb: upload.chunk_size_mb,
+          uploadConcurrency: upload.concurrency,
         })
         setModelOptions(uniqueModels([openai.model]))
         setModelsLoaded(false)
@@ -120,6 +131,11 @@ export function SettingsDialog() {
         translate_concurrency: settings.translateConcurrency,
       })
       const ytdlp = await saveYtdlpSettings({ proxy_port: settings.proxyPort })
+      const upload = await saveUploadSettings({
+        mode: settings.uploadMode,
+        chunk_size_mb: settings.chunkSizeMb,
+        concurrency: settings.uploadConcurrency,
+      })
       setMessageKey("saved")
       setSettings((current) => ({
         ...current,
@@ -127,6 +143,9 @@ export function SettingsDialog() {
         cookie: cookieDirty ? (cookie?.exists ? SAVED_COOKIE_SENTINEL : "") : current.cookie,
         translateConcurrency: openai.translate_concurrency || current.translateConcurrency,
         proxyPort: ytdlp.proxy_port,
+        uploadMode: upload.mode,
+        chunkSizeMb: upload.chunk_size_mb,
+        uploadConcurrency: upload.concurrency,
       }))
       setCookieDirty(false)
       setApiKeyDirty(false)
@@ -315,6 +334,59 @@ export function SettingsDialog() {
                   </Button>
                 </div>
               </div>
+              <div className="grid gap-2">
+                <Label htmlFor="uploadMode">上传模式</Label>
+                <Select
+                  value={settings.uploadMode}
+                  onValueChange={(value) =>
+                    setSettings((current) => ({ ...current, uploadMode: value as "single" | "chunked" }))
+                  }
+                >
+                  <SelectTrigger id="uploadMode">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="single">单次上传</SelectItem>
+                    <SelectItem value="chunked">分段上传（支持断点续传）</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {settings.uploadMode === "chunked" && (
+                <>
+                  <div className="grid gap-2">
+                    <Label htmlFor="chunkSizeMb">分段大小 (MB)</Label>
+                    <Input
+                      id="chunkSizeMb"
+                      inputMode="numeric"
+                      value={settings.chunkSizeMb}
+                      onChange={(event) =>
+                        setSettings((current) => ({
+                          ...current,
+                          chunkSizeMb: event.target.value.replace(/[^0-9]/g, ""),
+                        }))
+                      }
+                      placeholder="10"
+                    />
+                    <p className="text-xs text-muted-foreground">建议值：5-20 MB</p>
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="uploadConcurrency">并发上传数</Label>
+                    <Input
+                      id="uploadConcurrency"
+                      inputMode="numeric"
+                      value={settings.uploadConcurrency}
+                      onChange={(event) =>
+                        setSettings((current) => ({
+                          ...current,
+                          uploadConcurrency: event.target.value.replace(/[^0-9]/g, ""),
+                        }))
+                      }
+                      placeholder="3"
+                    />
+                    <p className="text-xs text-muted-foreground">建议值：1-5</p>
+                  </div>
+                </>
+              )}
               <div className="grid gap-2">
                 <Label htmlFor="translateConcurrency">{t.settings.translateConcurrency}</Label>
                 <Input

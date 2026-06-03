@@ -61,6 +61,23 @@ export type YtdlpSettings = {
   proxy_port: string
 }
 
+export type UploadSettings = {
+  mode: "single" | "chunked"
+  chunk_size_mb: string
+  concurrency: string
+}
+
+export type ChunkUploadInitResponse = {
+  upload_id: string
+  chunk_size: number
+}
+
+export type ChunkUploadStatus = {
+  uploaded_chunks: number[]
+  total_chunks: number
+  progress: number
+}
+
 export type LocalDirection = "en-zh" | "zh-en"
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -198,6 +215,90 @@ export function saveYtdlpSettings(settings: YtdlpSettings) {
     method: "POST",
     body: JSON.stringify(settings),
   })
+}
+
+export function getUploadSettings() {
+  return request<UploadSettings>("/api/settings/upload")
+}
+
+export function saveUploadSettings(settings: UploadSettings) {
+  return request<UploadSettings>("/api/settings/upload", {
+    method: "POST",
+    body: JSON.stringify(settings),
+  })
+}
+
+export async function initChunkUpload(
+  direction: LocalDirection,
+  fileName: string,
+  fileSize: number,
+  totalChunks: number
+): Promise<ChunkUploadInitResponse> {
+  const response = await fetch(`${API_BASE}/api/tasks/upload/init`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      direction,
+      file_name: fileName,
+      file_size: fileSize,
+      total_chunks: totalChunks,
+    }),
+    cache: "no-store",
+  })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}))
+    throw new Error(body.detail || `Request failed: ${response.status}`)
+  }
+  return response.json()
+}
+
+export async function uploadChunk(
+  uploadId: string,
+  chunkIndex: number,
+  chunk: Blob
+): Promise<{ uploaded_chunks: number[] }> {
+  const form = new FormData()
+  form.append("upload_id", uploadId)
+  form.append("chunk_index", chunkIndex.toString())
+  form.append("file", chunk)
+
+  const response = await fetch(`${API_BASE}/api/tasks/upload/chunk`, {
+    method: "POST",
+    body: form,
+    cache: "no-store",
+  })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}))
+    throw new Error(body.detail || `Request failed: ${response.status}`)
+  }
+  return response.json()
+}
+
+export async function completeChunkUpload(uploadId: string): Promise<Task> {
+  const form = new FormData()
+  form.append("upload_id", uploadId)
+
+  const response = await fetch(`${API_BASE}/api/tasks/upload/complete`, {
+    method: "POST",
+    body: form,
+    cache: "no-store",
+  })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}))
+    throw new Error(body.detail || `Request failed: ${response.status}`)
+  }
+  return response.json()
+}
+
+export async function getChunkUploadStatus(uploadId: string): Promise<ChunkUploadStatus> {
+  const response = await fetch(`${API_BASE}/api/tasks/upload/status/${uploadId}`, {
+    cache: "no-store",
+  })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}))
+    throw new Error(body.detail || `Request failed: ${response.status}`)
+  }
+  return response.json()
 }
 
 export function finalVideoUrl(taskId: string) {

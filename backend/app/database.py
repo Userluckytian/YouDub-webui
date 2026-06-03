@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import DB_PATH, ensure_runtime_dirs, openai_defaults, ytdlp_defaults
+from .config import DB_PATH, ensure_runtime_dirs, openai_defaults, upload_defaults, ytdlp_defaults
 from .stages import STAGES
 
 
@@ -73,6 +73,11 @@ def init_db() -> None:
             conn.execute(
                 "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
                 (f"ytdlp.{key}", value, now_iso()),
+            )
+        for key, value in upload_defaults().items():
+            conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+                (f"upload.{key}", value, now_iso()),
             )
         task_columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
         if "title" not in task_columns:
@@ -328,6 +333,21 @@ def get_ytdlp_settings() -> dict[str, str]:
 
 def save_ytdlp_settings(proxy_port: str) -> None:
     set_setting("ytdlp.proxy_port", proxy_port.strip())
+
+
+def get_upload_settings() -> dict[str, str]:
+    defaults = upload_defaults()
+    return {
+        "mode": get_setting("upload.mode", defaults["mode"]),
+        "chunk_size_mb": get_setting("upload.chunk_size_mb", defaults["chunk_size_mb"]),
+        "concurrency": get_setting("upload.concurrency", defaults["concurrency"]),
+    }
+
+
+def save_upload_settings(mode: str, chunk_size_mb: str, concurrency: str) -> None:
+    set_setting("upload.mode", mode.strip())
+    set_setting("upload.chunk_size_mb", chunk_size_mb.strip())
+    set_setting("upload.concurrency", concurrency.strip())
 
 
 def log_path(task_id: str) -> Path:
